@@ -1,140 +1,310 @@
 
 import os
-import threading
+import json
 import logging
-
-from flask import Flask
-from waitress import serve
+from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes
+    ConversationHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
 )
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
+
+ARQUIVO = Path("produtos.json")
+
+NOME, PRECO, MIDIA = range(3)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-web = Flask(__name__)
+
+def carregar_produtos():
+    if not ARQUIVO.exists():
+        return []
+
+    try:
+        return json.loads(ARQUIVO.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
 
 
-@web.route("/")
-def home():
-    return "DZ STORE está online!", 200
+def salvar_produtos(produtos):
+    ARQUIVO.write_text(
+        json.dumps(produtos, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
 
-def menu_principal():
+def sou_admin(user_id):
+    return ADMIN_ID and str(user_id) == str(ADMIN_ID)
+
+
+def menu():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🛍️ Catálogo", callback_data="catalogo"),
-            InlineKeyboardButton("👤 Meu perfil", callback_data="perfil")
-        ],
-        [
-            InlineKeyboardButton("💰 Adicionar saldo", callback_data="saldo"),
-            InlineKeyboardButton("📞 Suporte", callback_data="suporte")
-        ]
+        [InlineKeyboardButton("🛍️ Ver catálogo", callback_data="catalogo")],
+        [InlineKeyboardButton("👤 Meu perfil", callback_data="perfil")],
+        [InlineKeyboardButton("📞 Suporte", callback_data="suporte")]
     ])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🟢 BEM-VINDO À DZ STORE!\n\n"
-        "Sua loja de produtos digitais.\n\n"
-        "Escolha uma opção abaixo:",
-        reply_markup=menu_principal()
+        "🔴 DZ STORE +18\n\n"
+        "Bem-vindo à nossa loja de conteúdos exclusivos!\n\n"
+        "Escolha uma opção:",
+        reply_markup=menu()
     )
+
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not sou_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Acesso não autorizado.")
+        return
+
+    teclado = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Cadastrar conteúdo", callback_data="cadastrar")],
+        [InlineKeyboardButton("📦 Ver produtos cadastrados", callback_data="admin_lista")]
+    ])
+
+    await update.message.reply_text(
+        "⚙️ PAINEL ADMINISTRATIVO\n\n"
+        "Gerencie os conteúdos da DZ STORE:",
+        reply_markup=teclado
+    )
+
+
+async def iniciar_cadastro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not sou_admin(query.from_user.id):
+        return ConversationHandler.END
+
+    await query.message.reply_text("📝 Digite o nome do conteúdo:")
+    return NOME
+
+
+async def receber_nome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    nome = update.message.text.strip()
+
+    if len(nome) < 2 or len(nome) > 80:
+        await update.message.reply_text("Digite um nome entre 2 e 80 caracteres.")
+        return NOME
+
+    context.user_data["novo_produto"] = {"nome": nome}
+
+    await update.message.reply_text(
+        "💰 Agora informe o preço em reais.\n"
+        "Exemplo: 25.00"
+    )
+    return PRECO
+
+
+async def receber_preco(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        preco = float(update.message.text.replace(",", "."))
+        if not 0.01 <= preco <= 10000:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Preço inválido. Digite um valor entre R$ 0,01 e R$ 10.000."
+        )
+        return PRECO
+
+    context.user_data["novo_produto"]["preco"] = round(preco, 2)
+
+    await update.message.reply_text(
+        "📸 Envie agora a foto ou o vídeo do conteúdo.\n\n"
+        "O arquivo será usado na entrega após a confirmação da compra."
+    )
+    return MIDIA
+
+
+async def receber_midia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mensagem = update.message
+
+    if mensagem.photo:
+        tipo = "foto"
+        arquivo_id = mensagem.photo[-1].file_id
+    elif mensagem.video:
+        tipo = "video"
+        arquivo_id = mensagem.video.file_id
+    else:
+        await mensagem.reply_text("Envie uma foto ou um vídeo, por favor.")
+        return MIDIA
+
+    produto = context.user_data.pop("novo_produto", {})
+    produtos = carregar_produtos()
+
+    novo_id = max([p.get("id", 0) for p in produtos], default=0) + 1
+
+    produto.update({
+        "id": novo_id,
+        "tipo": tipo,
+        "arquivo_id": arquivo_id
+    })
+
+    produtos.append(produto)
+    salvar_produtos(produtos)
+
+    await mensagem.reply_text(
+        f"✅ Produto cadastrado!\n\n"
+        f"Nome: {produto['nome']}\n"
+        f"Preço: R$ {produto['preco']:.2f}\n"
+        f"ID: {novo_id}"
+    )
+
+    return ConversationHandler.END
+
+
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("novo_produto", None)
+    await update.message.reply_text("Cadastro cancelado.")
+    return ConversationHandler.END
 
 
 async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "inicio":
-        await query.edit_message_text(
-            "🟢 DZ STORE\n\nEscolha uma opção:",
-            reply_markup=menu_principal()
+    if query.data == "catalogo":
+        produtos = carregar_produtos()
+
+        if not produtos:
+            await query.message.reply_text(
+                "🛍️ Nosso catálogo está sendo preparado. Volte em breve!"
+            )
+            return
+
+        for p in produtos:
+            teclado = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔎 Ver detalhes",
+                    callback_data=f"produto:{p['id']}"
+                )]
+            ])
+
+            texto = (
+                f"🔎 Produto {p['id']}\n\n"
+                f"✨ {p['nome']}\n\n"
+                f"💵 Preço: R$ {p['preco']:.2f}\n"
+                f"🔒 Conteúdo exclusivo"
+            )
+
+            await query.message.reply_text(texto, reply_markup=teclado)
+
+    elif query.data.startswith("produto:"):
+        produto_id = int(query.data.split(":")[1])
+        produtos = carregar_produtos()
+        produto = next(
+            (p for p in produtos if p["id"] == produto_id),
+            None
         )
 
-    elif query.data == "catalogo":
-        teclado = [
-            [InlineKeyboardButton("📘 E-books — Em breve", callback_data="indisponivel")],
-            [InlineKeyboardButton("🎨 Artes digitais — Em breve", callback_data="indisponivel")],
-            [InlineKeyboardButton("📱 Templates — Em breve", callback_data="indisponivel")],
-            [InlineKeyboardButton("📦 Outros produtos — Em breve", callback_data="indisponivel")],
-            [InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")]
-        ]
+        if not produto:
+            await query.message.reply_text("Produto não encontrado.")
+            return
 
-        await query.edit_message_text(
-            "🛍️ CATÁLOGO DZ STORE\n\n"
-            "Confira nossos produtos digitais.\n"
-            "Novos produtos serão adicionados em breve.",
-            reply_markup=InlineKeyboardMarkup(teclado)
+        teclado = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🛒 Comprar",
+                callback_data=f"comprar:{produto_id}"
+            )],
+            [InlineKeyboardButton("⬅️ Catálogo", callback_data="catalogo")]
+        ])
+
+        await query.message.reply_text(
+            f"✨ DETALHES DO CONTEÚDO\n\n"
+            f"Produto: {produto['nome']}\n"
+            f"Formato: {produto['tipo'].upper()}\n"
+            f"Preço: R$ {produto['preco']:.2f}\n\n"
+            f"🔐 Arquivo protegido até a confirmação do pagamento.",
+            reply_markup=teclado
+        )
+
+    elif query.data.startswith("comprar:"):
+        await query.message.reply_text(
+            "💳 O pagamento ainda não está configurado.\n\n"
+            "Nenhuma cobrança foi realizada. Em breve você poderá comprar "
+            "com segurança."
         )
 
     elif query.data == "perfil":
-        usuario = query.from_user
-
-        await query.edit_message_text(
-            "👤 MEU PERFIL\n\n"
-            f"Nome: {usuario.first_name}\n"
-            f"ID: {usuario.id}\n\n"
-            "Saldo: R$ 0,00\n"
-            "Compras: 0",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")]
-            ])
-        )
-
-    elif query.data == "saldo":
-        await query.edit_message_text(
-            "💰 ADICIONAR SALDO\n\n"
-            "A integração Pix será configurada em uma próxima etapa.\n"
-            "Esta versão ainda não recebe pagamentos.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")]
-            ])
+        await query.message.reply_text(
+            f"👤 MEU PERFIL\n\n"
+            f"Nome: {query.from_user.first_name}\n"
+            f"ID: {query.from_user.id}"
         )
 
     elif query.data == "suporte":
-        await query.edit_message_text(
-            "📞 SUPORTE DZ STORE\n\n"
-            "Nosso atendimento será disponibilizado em breve.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")]
-            ])
+        await query.message.reply_text(
+            "📞 SUPORTE DZ STORE\n\nEntre em contato com o administrador."
         )
 
-    elif query.data == "indisponivel":
-        await query.answer(
-            "Este produto ainda não está disponível.",
-            show_alert=True
-        )
+    elif query.data == "admin_lista":
+        if not sou_admin(query.from_user.id):
+            return
+
+        produtos = carregar_produtos()
+
+        if not produtos:
+            await query.message.reply_text("Nenhum produto cadastrado.")
+            return
+
+        texto = "📦 PRODUTOS CADASTRADOS\n\n"
+        for p in produtos:
+            texto += (
+                f"ID: {p['id']}\n"
+                f"Nome: {p['nome']}\n"
+                f"Preço: R$ {p['preco']:.2f}\n\n"
+            )
+
+        await query.message.reply_text(texto)
 
 
-def iniciar_bot():
+def main():
     if not TOKEN:
-        raise RuntimeError("A variável TELEGRAM_BOT_TOKEN não foi configurada.")
+        raise RuntimeError("Configure TELEGRAM_BOT_TOKEN.")
 
-    bot = Application.builder().token(TOKEN).build()
+    if not ADMIN_ID:
+        raise RuntimeError("Configure ADMIN_ID.")
 
-    bot.add_handler(CommandHandler("start", start))
-    bot.add_handler(CallbackQueryHandler(botoes))
+    app = Application.builder().token(TOKEN).build()
+
+    cadastro = ConversationHandler(
+        entry_points=[CallbackQueryHandler(
+            iniciar_cadastro,
+            pattern="^cadastrar$"
+        )],
+        states={
+            NOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_nome)],
+            PRECO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_preco)],
+            MIDIA: [MessageHandler(
+                filters.PHOTO | filters.VIDEO,
+                receber_midia
+            )]
+        },
+        fallbacks=[CommandHandler("cancelar", cancelar)]
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin))
+    app.add_handler(cadastro)
+    app.add_handler(CallbackQueryHandler(botoes))
 
     logging.info("DZ STORE iniciado!")
-    bot.run_polling(stop_signals=None)
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    threading.Thread(
-        target=iniciar_bot,
-        daemon=True
-    ).start()
-
-    porta = int(os.environ.get("PORT", 10000))
-    serve(web, host="0.0.0.0", port=porta)
+    main()
