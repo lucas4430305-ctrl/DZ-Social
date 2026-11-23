@@ -1,11 +1,12 @@
 
 import os
+import threading
 import logging
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+
+from flask import Flask
+from waitress import serve
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -16,16 +17,16 @@ from telegram.ext import (
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-PRODUTOS = [
-    ("📘 E-book", "Em breve"),
-    ("🎨 Artes digitais", "Em breve"),
-    ("📱 Templates", "Em breve"),
-    ("📦 Outros produtos", "Em breve")
-]
+web = Flask(__name__)
+
+
+@web.route("/")
+def home():
+    return "DZ STORE está online!", 200
 
 
 def menu_principal():
@@ -42,14 +43,10 @@ def menu_principal():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mensagem = (
+    await update.message.reply_text(
         "🟢 BEM-VINDO À DZ STORE!\n\n"
         "Sua loja de produtos digitais.\n\n"
-        "Escolha uma opção abaixo para continuar:"
-    )
-
-    await update.message.reply_text(
-        mensagem,
+        "Escolha uma opção abaixo:",
         reply_markup=menu_principal()
     )
 
@@ -66,19 +63,16 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "catalogo":
         teclado = [
-            [InlineKeyboardButton(
-                f"{nome} — {preco}",
-                callback_data="indisponivel"
-            )]
-            for nome, preco in PRODUTOS
+            [InlineKeyboardButton("📘 E-books — Em breve", callback_data="indisponivel")],
+            [InlineKeyboardButton("🎨 Artes digitais — Em breve", callback_data="indisponivel")],
+            [InlineKeyboardButton("📱 Templates — Em breve", callback_data="indisponivel")],
+            [InlineKeyboardButton("📦 Outros produtos — Em breve", callback_data="indisponivel")],
+            [InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")]
         ]
-        teclado.append([
-            InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")
-        ])
 
         await query.edit_message_text(
             "🛍️ CATÁLOGO DZ STORE\n\n"
-            "Confira nossos produtos digitais:\n\n"
+            "Confira nossos produtos digitais.\n"
             "Novos produtos serão adicionados em breve.",
             reply_markup=InlineKeyboardMarkup(teclado)
         )
@@ -100,9 +94,8 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "saldo":
         await query.edit_message_text(
             "💰 ADICIONAR SALDO\n\n"
-            "O sistema de recarga via Pix será integrado "
-            "após configurarmos o provedor de pagamento.\n\n"
-            "Nenhum pagamento é solicitado nesta versão.",
+            "A integração Pix será configurada em uma próxima etapa.\n"
+            "Esta versão ainda não recebe pagamentos.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")]
             ])
@@ -111,7 +104,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "suporte":
         await query.edit_message_text(
             "📞 SUPORTE DZ STORE\n\n"
-            "Em breve disponibilizaremos nosso canal de atendimento.",
+            "Nosso atendimento será disponibilizado em breve.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ Voltar", callback_data="inicio")]
             ])
@@ -124,18 +117,24 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def main():
+def iniciar_bot():
     if not TOKEN:
-        raise RuntimeError("Configure a variável TELEGRAM_BOT_TOKEN.")
+        raise RuntimeError("A variável TELEGRAM_BOT_TOKEN não foi configurada.")
 
-    app = Application.builder().token(TOKEN).build()
+    bot = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(botoes))
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CallbackQueryHandler(botoes))
 
-    print("DZ STORE iniciado!")
-    app.run_polling()
+    logging.info("DZ STORE iniciado!")
+    bot.run_polling(stop_signals=None)
 
 
 if __name__ == "__main__":
-    main()
+    threading.Thread(
+        target=iniciar_bot,
+        daemon=True
+    ).start()
+
+    porta = int(os.environ.get("PORT", 10000))
+    serve(web, host="0.0.0.0", port=porta)
